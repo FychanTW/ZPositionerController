@@ -48,6 +48,7 @@ int Waveform[100]; //length should be defined.
 int duty_mode= 1;
 int mode = 0;
 bool PWM_duty_EXTI_Flag = false;
+bool Toggle_unlock = false;
 bool DAC_Out_EXTI_Flag = false;
 uint32_t Speed = 0;
 int rot_old_state = 0;
@@ -55,6 +56,9 @@ int rot_new_state = 0;
 int rot_cnt = 0;
 int Rotary_dir = 1;
 int busy_flag = 0;
+int32_t DAC_value = 0;
+int32_t fine_DAC_value = 0;
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,6 +69,8 @@ int busy_flag = 0;
 /* Private variables ---------------------------------------------------------*/
 DAC_HandleTypeDef hdac;
 
+TIM_HandleTypeDef htim2;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -73,91 +79,22 @@ DAC_HandleTypeDef hdac;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DAC_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
-void BlinkLED3(void);
-void respirationLED(void);
-void RotaryEncoderAction(int);
-void generate100Sawtooth(uint32_t divider, int32_t Rotary_dir, uint32_t duty, int rot_cnt);
+void generateSawtooth(uint32_t divider, int32_t Rotary_dir, uint32_t duty, int rot_cnt);
 void SpeedLD_Display(void);
+void UpdateInterruptSignal(void);
+void Coarse_Move(uint32_t duty_counter, uint32_t total_counter, int32_t direction);
+void Fine_Move(uint32_t increment, int32_t direction);
+void BlinkLED(uint16_t Toggle_Pin);
+void delay_ms(uint16_t au16_ms);
+void delay_us(uint16_t au16_us);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// calculate the waveform for the DAC
-// the waveform is a sawtooth signal repeated from 100 times if the duty cycle is 100%
-// the if the duty cycle is 50%, the last 50% of the waveform is 0-padding
-// the waveform is stored in the array Waveform and can be used by the DMA
-void generateWaveform(uint32_t frequency, uint32_t dutyCycle)
-{
-  // Calculate the number of ramp-up cycles and 0-padding cycles
-  uint32_t numRampUpCycles = (uint32_t)((dutyCycle / 100.0) * totalCycles);
-  uint32_t numPaddingCycles = totalCycles - numRampUpCycles;
-  int * zeroPaddingPtn = &Waveform[numRampUpCycles*sample_per_period];
-  // Generate the signal
-  for (uint32_t i = 0; i < numRampUpCycles; i++)
-  {
-    // Generate a ramp-up cycle
-    for (uint32_t j = 0; j < sample_per_period; j++)
-    {
-      // Increment the DAC output value to generate the sawtooth waveform
-      //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, j * (4095 / rampUpDuration));
-      Waveform[i*sample_per_period+j] = j * (4095 / sample_per_period);
-    }
-
-    // Delay to maintain the duty cycle
-    //HAL_Delay(rampUpDuration);
-  }
-
-  // Generate the 0-padding cycles
-  if (numPaddingCycles > 0){
-    for (uint32_t i = 0; i < numPaddingCycles*sample_per_period; i++)
-    {
-      // Keep the DAC output value at 0 for the duration of each padding cycle
-      //HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
-      *(zeroPaddingPtn+i) = 0;
-
-      // Delay to maintain the duty cycle
-      //HAL_Delay(rampUpDuration);
-    }
-  }
-}
-/*
-void UpdateInterruptSignal(void)
-{
-	if(PWM_duty_EXTI_Flag)
-	{
-		if(duty_mode == 3)
-		{
-			duty_mode = 0;
-			PWM_duty_EXTI_Flag = false;
-		}
-		else{
-			 duty_mode++;
-			 PWM_duty_EXTI_Flag = false;
-		}
-	}
-	if(DAC_Out_EXTI_Flag)
-	{
-		if(busy_flag == 0)
-		{
-			busy_flag = 1;
-			//generate100Sawtooth(1,Rotary_dir,duty_mode, 1);
-			//HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047+Rotary_dir*2047);
-			DAC_Out_EXTI_Flag=false;
-			rot_cnt=0;
-
-		}
-
-	}
-}
-*/
-
-uint8_t rot_get_state() {
-	return (uint8_t)((HAL_GPIO_ReadPin(GPIOB, Rotary_Left_Pin) << 1) 
-                | (HAL_GPIO_ReadPin(GPIOB, Rotary_Right_Pin)));
-}
 
 /* USER CODE END 0 */
 
@@ -190,27 +127,27 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DAC_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  //set the LD3 and LD4 to be off
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
-  HAL_SYSTICK_Config(SystemCoreClock/1000);
+  HAL_SYSTICK_Config(SystemCoreClock/200);
+  HAL_GPIO_WritePin(LD_Speed1_GPIO_Port, 0x1F00, GPIO_PIN_SET);
+  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
 
   //SpeedLD_Display();
-
+  HAL_TIM_Base_Start(&htim2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  //generate100Sawtooth(1,1,duty_mode);
-	  SpeedLD_Display();
-
 	  DAC_Out_EXTI_Flag = false;
 	  PWM_duty_EXTI_Flag = false;
-	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047);
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -297,6 +234,51 @@ static void MX_DAC_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 24;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 65535;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -318,14 +300,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, LD_Speed1_Pin|LD_Speed2_Pin|LD_Speed3_Pin|LD_Speed4_Pin
                           |LD_Speed5_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : Rotary_Right_Pin */
-  GPIO_InitStruct.Pin = Rotary_Right_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(Rotary_Right_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : Rotary_Left_Pin Toggle_Up_Pin Toggle_Down_Pin */
-  GPIO_InitStruct.Pin = Rotary_Left_Pin|Toggle_Up_Pin|Toggle_Down_Pin;
+  /*Configure GPIO pins : Rotary_Right_Pin Rotary_Left_Pin Toggle_Up_Pin Toggle_Down_Pin */
+  GPIO_InitStruct.Pin = Rotary_Right_Pin|Rotary_Left_Pin|Toggle_Up_Pin|Toggle_Down_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
@@ -342,7 +318,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = LD_Speed1_Pin|LD_Speed2_Pin|LD_Speed3_Pin|LD_Speed4_Pin
                           |LD_Speed5_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
@@ -363,9 +339,13 @@ static void MX_GPIO_Init(void)
 
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
-	if(GPIO_Pin == Toggle_Up_Pin)
+	uint16_t Toggle_Pin = 0x0100;
+	uint16_t Not_Toggle_Pin = 0x1F00;
+	if(GPIO_Pin == Toggle_Up_Pin && Toggle_unlock)
 	{
-		//PWM_duty_EXTI_Flag = true;
+		Toggle_unlock = false;
+
+		PWM_duty_EXTI_Flag = false;
 		if(duty_mode == 5)
 		{
 			duty_mode = 5;
@@ -373,164 +353,75 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 		else{
 			 duty_mode++;
 		}
+		HAL_GPIO_WritePin(LD_Speed1_GPIO_Port, Not_Toggle_Pin, GPIO_PIN_RESET);
+
+		uint16_t Pin_count = 0x0001;
+		for(int mode = 1; mode<duty_mode; mode++)
+		{
+			Pin_count = Pin_count+(0x0001<<mode);
+		}
+		// Offset to GPIOA_Pin8
+		Toggle_Pin = Pin_count <<8;
+
+
+		HAL_GPIO_WritePin(LD_Speed1_GPIO_Port, Toggle_Pin, GPIO_PIN_SET);
+
 	}
-	else if(GPIO_Pin == Toggle_Down_Pin)
+
+	else if(GPIO_Pin == Toggle_Down_Pin && Toggle_unlock)
 	{
-		//PWM_duty_EXTI_Flag = true;
+		Toggle_unlock = false;
+		PWM_duty_EXTI_Flag = false;
 		if(duty_mode == 1)
 		{
 			duty_mode = 1;
+
 		}
 		else{
 			 duty_mode--;
 		}
+
+		uint16_t Pin_count = 0x0001;
+		for(int mode = 1; mode<duty_mode; mode++)
+		{
+			Pin_count = Pin_count+(0x0001<<mode);
+		}
+		// Offset to GPIOA_Pin8
+		Toggle_Pin = Pin_count <<8;
+
+		HAL_GPIO_WritePin(LD_Speed1_GPIO_Port, Not_Toggle_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_SET);
+
+
+
 	}
 
-	//if(GPIO_Pin == USER_B1_Pin)
-	//{
-		//PWM_duty_EXTI_Flag = true;
-	//	DAC_Out_EXTI_Flag = true;
-	//}
-	else if ((GPIO_Pin == Rotary_Right_Pin) && (!(DAC_Out_EXTI_Flag||PWM_duty_EXTI_Flag)))
+//	else if ((GPIO_Pin == Rotary_Right_Pin) && (!(DAC_Out_EXTI_Flag||PWM_duty_EXTI_Flag)))
+	else if ((GPIO_Pin == Rotary_Right_Pin) && (!DAC_Out_EXTI_Flag))
 	{
 		if(HAL_GPIO_ReadPin(GPIOC, Rotary_Left_Pin)==1)
 		{
 			Rotary_dir = 1;
 			DAC_Out_EXTI_Flag = true;
-			generate100Sawtooth(1,Rotary_dir,duty_mode, 1);
-			//DAC_Out_EXTI_Flag = false;
+			generateSawtooth(1,Rotary_dir,duty_mode, 1);
 		}
 	}
-	else if ((GPIO_Pin == Rotary_Left_Pin) && (!(DAC_Out_EXTI_Flag||PWM_duty_EXTI_Flag)))
+	//else if ((GPIO_Pin == Rotary_Left_Pin) && (!(DAC_Out_EXTI_Flag||PWM_duty_EXTI_Flag)))
+	else if ((GPIO_Pin == Rotary_Left_Pin) && !(DAC_Out_EXTI_Flag))
 	{
 		if(HAL_GPIO_ReadPin(GPIOC, Rotary_Right_Pin)==1)
 		{
 			Rotary_dir = -1;
 			DAC_Out_EXTI_Flag = true;
-			generate100Sawtooth(1,Rotary_dir,duty_mode, 1);
-			//DAC_Out_EXTI_Flag = false;
+			generateSawtooth(1,Rotary_dir,duty_mode, 1);
 		}
 	}
-/*
-	if (GPIO_Pin == Rotary_Right_Pin || GPIO_Pin == Rotary_Left_Pin) {
-
-		rot_new_state = rot_get_state();
-
-		//DBG("%d:%d", rot_old_state, rot_new_state);
-
-		// Check transition
-    //below are the forward direction
-		if (rot_old_state == 3 && rot_new_state == 2) {        // 3 -> 2 transition
-			//rot_cnt++;
-	      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 511);
-	      DAC_Out_EXTI_Flag = false;
-		}
-    else if (rot_old_state == 2 && rot_new_state == 0) { // 2 -> 0 transition
-			//rot_cnt++;
-	      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 1023);
-    	DAC_Out_EXTI_Flag = false;
-		}
-    else if (rot_old_state == 0 && rot_new_state == 1) { // 0 -> 1 transition
-			//rot_cnt++;
-	    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 1535);
-    	DAC_Out_EXTI_Flag = false;
-		}
-    else if (rot_old_state == 1 && rot_new_state == 3) { // 1 -> 3 transition
-			//rot_cnt++;
-      Rotary_dir = 1;
-      DAC_Out_EXTI_Flag = true;
-      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047);
-
-		}
-    // below are the reverse direction
-    else if (rot_old_state == 3 && rot_new_state == 1) { // 3 -> 1 transition
-			//rot_cnt--;
-    	DAC_Out_EXTI_Flag = false;
-        HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047+512);
-		}
-    else if (rot_old_state == 1 && rot_new_state == 0) { // 1 -> 0 transition
-			//rot_cnt--;
-
-
-    	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047+1024);
-    	DAC_Out_EXTI_Flag = false;
-		}
-    else if (rot_old_state == 0 && rot_new_state == 2) { // 0 -> 2 transition
-			//rot_cnt--;
-    	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 2047+1024+512);
-    	DAC_Out_EXTI_Flag = false;
-		}
-    else if (rot_old_state == 2 && rot_new_state == 3) { // 2 -> 3 transition
-			//rot_cnt--;
-			Rotary_dir = -1;
-    		DAC_Out_EXTI_Flag = true;
-    		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 4095);
-    		//UpdateInterruptSignal();
-		}
-
-		rot_old_state = rot_new_state;
-	}
-	*/
 }
 
-//void RotaryEncoderAction(int Rotary_Dir)
-//{
-// if(Rotary_Dir == -1)
-// {
-//  if(Speed != 0)
-//  {
-//   Speed = Speed - 8;
-//  }
-//  else
-//  {
-//   Speed = 0;
-//  }
-//  //HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
-// }
-// else if(Rotary_Dir == 1)
-// {
-//  if(Speed != 128)
-//  {
-//   Speed = Speed + 8;
-//  }
-//  else
-//  {
-//   Speed = 128;
-//  }
-//  //HAL_GPIO_TogglePin(LD4_GPIO_Port, LD4_Pin);
-// }
-// else
-// {
-//   //do nothing
-// }
-//}
-
-//Toggle LED LD3 to have a breath effect
-//The speed will be controlled by the variabl Speed
-void BlinkLED3()
-{
-  int DelayIncrement = 1;
-  //LED ON ramping up phase:
-  for(int i = 1; i <= 9; i+=DelayIncrement)
-  {
-	HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_SET);
-    HAL_Delay(i);
-    HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_RESET);
-    HAL_Delay(10-DelayIncrement);
-  }
-  //LED OFF ramping down phase:
-  for(int i = 1; i <= 9; i+=DelayIncrement)
-  {
-	HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_SET);
-    HAL_Delay(10-DelayIncrement);
-    HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_RESET);;
-    HAL_Delay(i);
-  }
-}
 
 void SpeedLD_Display()
 {
-	uint16_t PIN_Mask = 0x1100;
+	//uint16_t PIN_Mask = 0x1100;
 	uint16_t Toggle_Pin = 0x0000;
 	uint16_t Not_Toggle_Pin = 0x1111;
 
@@ -553,188 +444,189 @@ void SpeedLD_Display()
 
 }
 
-
-void respirationLED(void)
+void  UpdateInterruptSignal()
 {
-  // Define the minimum and maximum brightness levels
-  uint32_t minBrightness = 0;
-  uint32_t maxBrightness = 500;
-
-  // Define the breathing period in milliseconds
-  uint32_t breathingPeriod = 3000;
-
-  // Define the number of steps for the breathing effect
-  uint32_t numSteps = 100;
-
-  // Calculate the delay between each step
-  uint32_t stepDelay = breathingPeriod / (2 * numSteps);
-
-  // Calculate the brightness increment for each step
-  uint32_t brightnessIncrement = (maxBrightness - minBrightness) / numSteps;
-
-  // Perform the breathing effect
-  for (uint32_t i = 0; i < numSteps; i++)
-  {
-    // Increase brightness
-    for (uint32_t brightness = minBrightness; brightness <= maxBrightness; brightness += brightnessIncrement)
-    {
-      // Set LD3 pin high (LED on)
-      HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_SET);
-      HAL_Delay(brightness);
-
-      // Set LD3 pin low (LED off)
-      HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_RESET);
-      HAL_Delay(stepDelay - brightness);
-    }
-
-    // Decrease brightness
-//    for (uint32_t brightness = maxBrightness; brightness >= minBrightness; brightness -= brightnessIncrement)
-//    {
-//      // Set LD3 pin high (LED on)
-//      HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_SET);
-//      HAL_Delay(brightness);
-//
-//      // Set LD3 pin low (LED off)
-//      HAL_GPIO_WritePin(GPIOC, LD3_Pin, GPIO_PIN_RESET);
-//      HAL_Delay(stepDelay - brightness);
-//    }
-  }
+	//PWM_duty_EXTI_Flag = true; // unlock every 100 ms;
+	DAC_Out_EXTI_Flag = false;
+	Toggle_unlock = true;
 }
-//generate 20 sawtooth waveforms, with frequency of 200 hz
-//initial value is 1.5V, then ramp up to 3V, then brutally drop down to 0 V, then ramp up back to 1.5V;
-void generate100Sawtooth(uint32_t divider, int32_t direction, uint32_t duty_mode, int rot_cnt)
+
+void generateSawtooth(uint32_t divider, int32_t direction, uint32_t duty_mode, int rot_cnt)
 {
-  //uint32_t period = HAL_RCC_GetHCLKFreq() / frequency;
-  uint32_t period =  64;
-  const uint32_t period_min = 64;
-  const uint32_t period_max = 65536;
 
-  uint32_t frequency = 64;
-
-  int32_t increment = 0;
-  uint32_t DAC_value = 0;
-  
-
-  increment = (int32_t)(4096/period);
-  //increment = 16;
   DAC_value = (uint32_t)(2047);
-  uint32_t Output_EN = 1;
+  //uint32_t Output_EN = 1;
   uint32_t duty_counter = 1;
   uint32_t total_counter = 1;
   busy_flag = 1;
   switch (duty_mode)
   {
-    //33% duty cycle
+    //Fine mode 1
   case 1:
-    duty_counter = 1;
-    total_counter = 3;
+    Fine_Move(128, direction);
     break;
 
-   //50% duty cycle 
+   //Fine mode 2 (Faster)
   case 2:
+    Fine_Move(512, direction);
+    break;
+
+   //66% duty cycle
+  case 3:
     duty_counter = 1;
     total_counter = 2;
+    Coarse_Move(duty_counter, total_counter, direction);
     break;
 
-   //66% duty cycle 
-  case 3:
-    duty_counter = 2;
-    total_counter = 3;
-    break;
-   
-   //100% duty cycle 
+   //100% duty cycle
   case 4:
     duty_counter = 2;
     total_counter = 3;
+    Coarse_Move(duty_counter, total_counter, direction);
     break;
 
    //100% duty cycle
   case 5:
-    duty_counter = 2;
-    total_counter = 3;
-    break;
-
-   //100% duty cycle
-
-  case 0:
     duty_counter = 1;
     total_counter = 1;
+    Coarse_Move(duty_counter, total_counter, direction);
     break;
 
-  //default duty cycle is 100%
   default:
     break;
   }
 
-  
-  for (uint32_t cycle = 0; cycle <9; cycle++)
-  {
-    //calculate output_EN based on the duty cycle and the current cycle
-    if(cycle%total_counter == 0)
-    {
-      Output_EN = 1;
-    }
-    else if(cycle%total_counter < duty_counter)
-    {
-      Output_EN = 1;
-    }
-    else
-    {
-      Output_EN = 0;
-    }
-
-	DAC_value = (uint32_t)(2047);
-  
-
-
-	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
-
-    // Generate a ramp-up cycle
-    for (uint32_t i = 0; i < (0.5*period-1); i++)
-    {
-      // Increment the DAC output value to generate the sawtooth waveform
-    	if (Output_EN)
-    	{
-    		DAC_value += increment*direction;
-    	}
-    	else
-    	{
-    		DAC_value = (uint32_t)(2047);
-    	}
-
-      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
-    }
-    //When reach the peak, brutally drop down to 0V
-	if (Output_EN)
-	{
-		DAC_value = 0;
-	}
-	else
-	{
-		DAC_value = (uint32_t)(2047);
-	}
-    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
-    //HAL_Delay(1);
-    //then ramp up back to 1.5V
-    for (uint32_t i = 0; i < (0.5*period-1); i++)
-    {
-      // Increment the DAC output value to generate the sawtooth waveform
-    	if (Output_EN)
-    	{
-    		DAC_value += increment*direction;
-    	}
-    	else
-    	{
-    		DAC_value = (uint32_t)(2047);
-    	}
-      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value);
-    }
-
-  }
-  busy_flag = 0;
-  
 }
 
+void Coarse_Move(uint32_t duty_counter, uint32_t total_counter, int32_t direction)
+{
+	  int32_t DAC_value = 0;
+	  int32_t DAC_value_ini = 0;
+	  uint32_t period =64;
+	  uint32_t increment = (uint32_t)(4096/period);
+	  uint32_t Output_EN = 1;
+
+
+
+	  if(direction ==1)
+	  {
+		  DAC_value_ini = 0;
+	  }
+	  else if (direction == -1)
+	  {
+		  DAC_value_ini = 4095;
+	  }
+
+	  for (uint32_t cycle = 0; cycle <64; cycle++)
+	  {
+	    //calculate output_EN based on the duty cycle and the current cycle
+	    if(cycle%total_counter == 0)
+	    {
+	      Output_EN = 1;
+	    }
+	    else if(cycle%total_counter < duty_counter)
+	    {
+	      Output_EN = 1;
+	    }
+	    else
+	    {
+	      Output_EN = 0;
+	    }
+	    DAC_value = DAC_value_ini;
+		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value*Output_EN);
+
+	    // Generate a ramp-up cycle
+	    for (uint32_t i = 0; i < (period-1); i++)
+	    {
+	      // Increment the DAC output value to generate the sawtooth waveform
+	    	if (Output_EN)
+	    	{
+	    		DAC_value += increment*direction;
+	    		if(DAC_value >=4095) { DAC_value =4095;}
+	    		else if(DAC_value <0) {DAC_value =0;}
+	    	}
+	    	else
+	    	{
+	    		DAC_value = 0;
+	    	}
+
+	      HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_value*Output_EN);
+	      delay_us(10);
+	    }
+	  }
+	  busy_flag = 0;
+	  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);
+
+}
+void Fine_Move(uint32_t increment, int32_t direction)
+{
+	int32_t tmp = fine_DAC_value;
+    fine_DAC_value = fine_DAC_value + increment*direction;
+    int32_t goal = fine_DAC_value;
+    while(tmp!=goal)
+    {
+    	tmp = tmp + direction;
+//    	if(tmp >=4095)
+//    	{
+//    		tmp =0;
+//    		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, tmp);
+//    		fine_DAC_value=tmp;
+//    		delay_us(10);
+//
+//    		break;
+//    	}
+//    	else if (tmp<0)
+//    	{
+//    		tmp = 4095;
+//    		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, tmp);
+//    		fine_DAC_value=tmp;
+//    		delay_us(10);
+//
+//    		break;
+//    	}
+//    	else
+    	{
+    		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, tmp);
+    		fine_DAC_value=tmp;
+    		delay_us(1000);
+
+    	}
+    }
+//	if(DAC_value >=4095) { DAC_value =0;}
+//	else if(DAC_value <0) {DAC_value =4095;}
+//
+//	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, fine_DAC_value);
+
+}
+void BlinkLED(uint16_t Toggle_Pin)
+{
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_RESET);
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_SET);
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_RESET);
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_SET);
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_RESET);
+	HAL_Delay(200);
+	HAL_GPIO_WritePin(GPIOA, Toggle_Pin, GPIO_PIN_SET);
+}
+void delay_us(uint16_t au16_us)
+{
+	htim2.Instance->CNT = 0;
+    while (htim2.Instance->CNT < au16_us);
+}
+void delay_ms(uint16_t au16_ms)
+{
+    while(au16_ms > 0)
+    {
+    htim2.Instance->CNT = 0;
+    au16_ms--;
+    while (htim2.Instance->CNT < 1000);
+    }
+}
 /* USER CODE END 4 */
 
 /**
